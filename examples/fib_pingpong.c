@@ -18,7 +18,7 @@ typedef struct {
 
 BigInt *bigint_from_int(Arena *a, int value) {
     BigInt *res = arena_alloc_struct(a, BigInt);
-    res->capacity = 4; /* Small start */
+    res->capacity = 4;
     res->digits = arena_alloc_array(a, uint32_t, res->capacity);
     
     if (value == 0) {
@@ -48,8 +48,6 @@ BigInt *bigint_add(Arena *a, BigInt *n1, BigInt *n2) {
         uint64_t val2 = (i < n2->len) ? n2->digits[i] : 0;
         
         uint64_t total = val1 + val2 + carry;
-        
-        /* Modulo arithmetic for Base 1e9 */
         sum->digits[sum->len++] = (uint32_t)(total % BIGINT_BASE);
         carry = total / BIGINT_BASE;
     }
@@ -62,29 +60,38 @@ BigInt *bigint_copy(Arena *dest, BigInt *src) {
     copy->len = src->len;
     copy->capacity = src->len;
     copy->digits = arena_alloc_array(dest, uint32_t, copy->capacity);
-    /* Note: size is calculated in bytes, so multiply by sizeof(uint32_t) */
     memcpy(copy->digits, src->digits, src->len * sizeof(uint32_t));
     return copy;
 }
 
-/* Helper to print Base 1e9 numbers correctly */
 void bigint_print_head(BigInt *n, int digit_count) {
     if (n->len == 0) {
         printf("0");
         return;
     }
-
-    /* 1. Print the most significant block normally (no leading zeros) */
     printf("%u", n->digits[n->len - 1]);
-
-    /* 2. Print remaining blocks with 9-digit padding (e.g. 000000123) */
-    int printed_digits = 0; // Rough count, not exact
-    
+    int printed_digits = 0;
     for (int i = (int)n->len - 2; i >= 0; i--) {
         if (printed_digits >= digit_count) break;
         printf("%09u", n->digits[i]);
         printed_digits += 9;
     }
+}
+
+/* --- Progress Bar Helper --- */
+void print_progress(int current, int total) {
+    const int bar_width = 50;
+    float progress = (float)current / total;
+    int filled = (int)(bar_width * progress);
+
+    printf("\r["); /* \r returns cursor to start of line */
+    for (int i = 0; i < bar_width; ++i) {
+        if (i < filled) printf("=");
+        else if (i == filled) printf(">");
+        else printf(" ");
+    }
+    printf("] %d%%", (int)(progress * 100.0));
+    fflush(stdout); /* Force update immediately */
 }
 
 /* --- Main Logic --- */
@@ -105,7 +112,16 @@ int main() {
     BigInt *n2 = bigint_from_int(curr_arena, 1);
     BigInt *result = NULL;
 
+    /* Update progress every 1% or at least every 1000 iterations */
+    int update_step = target_n / 100; 
+    if (update_step < 1000) update_step = 1000;
+
     for (int i = 2; i <= target_n; i++) {
+        /* Update Progress Bar */
+        if (i % update_step == 0 || i == target_n) {
+            print_progress(i, target_n);
+        }
+
         BigInt *sum = bigint_add(next_arena, n1, n2);
         BigInt *n2_copy = bigint_copy(next_arena, n2);
 
@@ -118,14 +134,16 @@ int main() {
         n1 = n2_copy;
         n2 = sum;
     }
+    
+    /* Clear progress bar line */
+    printf("\n\n");
+
     result = n2;
 
     clock_t end = clock();
     double time_taken = ((double)(end - start)) / CLOCKS_PER_SEC;
 
     printf("Done!\n");
-    /* Approximate digit count: (blocks-1)*9 + digits_in_top_block */
-    /* Exact calculation is verbose, this is close enough for stats */
     printf("Result Blocks: %zu (Approx %zu decimal digits)\n", 
            result->len, result->len * 9);
     printf("Time Taken:    %.4f seconds\n", time_taken);
