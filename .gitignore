@@ -1,0 +1,16 @@
+# Ignore build artifacts
+build/
+*.o
+*.so
+*.exe
+*.dSYM
+
+# Ignore executables (if built in root)
+arena_test
+arena_threaded
+fib_fast
+fib_pingpong
+
+# OS Junk
+.DS_Store
+Thumbs.db
