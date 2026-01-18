@@ -2,73 +2,93 @@
 #include <string.h>
 #include <time.h>
 #include <stdint.h>
-
-#define ARENA_IMPLEMENTATION
-#include "arena.h"
+#include <stdlib.h>
 
 /* --- BigInt Logic (Base 1,000,000,000) --- */
-
 #define BIGINT_BASE 1000000000ULL
 
 typedef struct {
-    uint32_t *digits; /* Each digit is 0..999,999,999 */
+    uint32_t *digits; 
     size_t len;
     size_t capacity; 
 } BigInt;
 
-BigInt *bigint_from_int(Arena *a, int value) {
-    BigInt *res = arena_alloc_struct(a, BigInt);
-    res->capacity = 4;
-    res->digits = arena_alloc_array(a, uint32_t, res->capacity);
-    
-    if (value == 0) {
-        res->len = 1; 
-        res->digits[0] = 0;
-    } else {
-        res->len = 0;
-        while (value > 0) {
-            res->digits[res->len++] = value % BIGINT_BASE;
-            value /= BIGINT_BASE;
-        }
-    }
+BigInt *bigint_alloc(size_t capacity) {
+    BigInt *res = malloc(sizeof(BigInt));
+    res->capacity = capacity;
+    res->digits = calloc(capacity, sizeof(uint32_t));
+    res->len = 1; 
     return res;
 }
 
-BigInt *bigint_add(Arena *a, BigInt *n1, BigInt *n2) {
-    BigInt *sum = arena_alloc_struct(a, BigInt);
-    
-    size_t max_len = (n1->len > n2->len) ? n1->len : n2->len;
-    sum->capacity = max_len + 1;
-    sum->digits = arena_alloc_array(a, uint32_t, sum->capacity);
-    sum->len = 0;
-
-    uint64_t carry = 0;
-    for (size_t i = 0; i < max_len || carry; i++) {
-        uint64_t val1 = (i < n1->len) ? n1->digits[i] : 0;
-        uint64_t val2 = (i < n2->len) ? n2->digits[i] : 0;
-        
-        uint64_t total = val1 + val2 + carry;
-        sum->digits[sum->len++] = (uint32_t)(total % BIGINT_BASE);
-        carry = total / BIGINT_BASE;
+void bigint_set_int(BigInt *n, int value) {
+    if (value == 0) {
+        n->len = 1;
+        n->digits[0] = 0;
+    } else {
+        n->len = 0;
+        while (value > 0) {
+            n->digits[n->len++] = value % BIGINT_BASE;
+            value /= BIGINT_BASE;
+        }
     }
-    
-    return sum;
 }
 
-BigInt *bigint_copy(Arena *dest, BigInt *src) {
-    BigInt *copy = arena_alloc_struct(dest, BigInt);
-    copy->len = src->len;
-    copy->capacity = src->len;
-    copy->digits = arena_alloc_array(dest, uint32_t, copy->capacity);
-    memcpy(copy->digits, src->digits, src->len * sizeof(uint32_t));
-    return copy;
+/* OPTIMIZED ADDITION 
+   - No 'if' statements inside the loop (Branchless)
+   - No bounds checking per digit (Unrolled)
+*/
+void bigint_add_branchless(BigInt *dest, BigInt *n1, BigInt *n2) {
+    // In Fib calculation, n1 and n2 are either equal length or off by 1.
+    // We process the common length first to avoid checks.
+    size_t len = (n1->len < n2->len) ? n1->len : n2->len;
+    
+    uint64_t carry = 0;
+    
+    // Direct pointer access for speed
+    uint32_t *d_ptr = dest->digits;
+    uint32_t *n1_ptr = n1->digits;
+    uint32_t *n2_ptr = n2->digits;
+
+    // --- HOT LOOP START ---
+    // This loop runs millions of times. It must be branch-free.
+    size_t i = 0;
+    for (; i < len; i++) {
+        uint64_t total = (uint64_t)n1_ptr[i] + n2_ptr[i] + carry;
+        
+        // Branchless Carry Calculation:
+        // 'carry' becomes 1 if total >= BASE, else 0.
+        carry = (total >= BIGINT_BASE); 
+        
+        // Subtract BASE if carry is 1. 
+        // We use multiplication to avoid an 'if'. 
+        // (carry * BASE) is either 0 or 1,000,000,000.
+        d_ptr[i] = (uint32_t)(total - (carry * BIGINT_BASE));
+    }
+    // --- HOT LOOP END ---
+
+    // Handle the tail (if n1 or n2 was longer)
+    for (; i < n1->len; i++) {
+        uint64_t total = n1_ptr[i] + carry;
+        carry = (total >= BIGINT_BASE);
+        d_ptr[i] = (uint32_t)(total - (carry * BIGINT_BASE));
+    }
+    for (; i < n2->len; i++) {
+        uint64_t total = n2_ptr[i] + carry;
+        carry = (total >= BIGINT_BASE);
+        d_ptr[i] = (uint32_t)(total - (carry * BIGINT_BASE));
+    }
+
+    // Handle final carry
+    if (carry) {
+        d_ptr[i++] = 1;
+    }
+
+    dest->len = i;
 }
 
 void bigint_print_head(BigInt *n, int digit_count) {
-    if (n->len == 0) {
-        printf("0");
-        return;
-    }
+    if (n->len == 0) { printf("0"); return; }
     printf("%u", n->digits[n->len - 1]);
     int printed_digits = 0;
     for (int i = (int)n->len - 2; i >= 0; i--) {
@@ -78,70 +98,55 @@ void bigint_print_head(BigInt *n, int digit_count) {
     }
 }
 
-/* --- Progress Bar Helper --- */
 void print_progress(int current, int total) {
-    const int bar_width = 50;
+    // Only update every ~1% to save I/O time
+    if (current % (total/100) != 0 && current != total) return;
+
+    const int bar_width = 40; 
     float progress = (float)current / total;
     int filled = (int)(bar_width * progress);
 
-    printf("\r["); /* \r returns cursor to start of line */
+    printf("\r[");
     for (int i = 0; i < bar_width; ++i) {
-        if (i < filled) printf("=");
-        else if (i == filled) printf(">");
-        else printf(" ");
+        printf(i < filled ? "=" : (i == filled ? ">" : " "));
     }
     printf("] %d%%", (int)(progress * 100.0));
-    fflush(stdout); /* Force update immediately */
+    fflush(stdout);
 }
 
-/* --- Main Logic --- */
-
 int main() {
-    Arena a1 = {0}; arena_init(&a1);
-    Arena a2 = {0}; arena_init(&a2);
-
-    Arena *curr_arena = &a1;
-    Arena *next_arena = &a2;
-
     int target_n = 5000000;
-    
-    printf("Calculating Fibonacci(%d) (Base 1e9 + Ping-Pong)...\n", target_n);
+    size_t MAX_BLOCKS = 120000; 
+
+    printf("Calculating Fibonacci(%d) (Base 1e9 + Branchless Logic)...\n", target_n);
     clock_t start = clock();
 
-    BigInt *n1 = bigint_from_int(curr_arena, 0);
-    BigInt *n2 = bigint_from_int(curr_arena, 1);
-    BigInt *result = NULL;
+    // 3 Static Buffers (Rotating strategy)
+    BigInt *b0 = bigint_alloc(MAX_BLOCKS); 
+    BigInt *b1 = bigint_alloc(MAX_BLOCKS); 
+    BigInt *b2 = bigint_alloc(MAX_BLOCKS); 
 
-    /* Update progress every 1% or at least every 1000 iterations */
-    int update_step = target_n / 100; 
-    if (update_step < 1000) update_step = 1000;
+    bigint_set_int(b0, 0);
+    bigint_set_int(b1, 1);
 
     for (int i = 2; i <= target_n; i++) {
-        /* Update Progress Bar */
-        if (i % update_step == 0 || i == target_n) {
-            print_progress(i, target_n);
-        }
+        print_progress(i, target_n);
 
-        BigInt *sum = bigint_add(next_arena, n1, n2);
-        BigInt *n2_copy = bigint_copy(next_arena, n2);
+        // Branchless Add
+        bigint_add_branchless(b2, b1, b0);
 
-        arena_reset(curr_arena);
-
-        Arena *temp = curr_arena;
-        curr_arena = next_arena;
-        next_arena = temp;
-
-        n1 = n2_copy;
-        n2 = sum;
+        // Pointer Swap
+        BigInt *temp = b0;
+        b0 = b1;
+        b1 = b2;
+        b2 = temp; 
     }
-    
-    /* Clear progress bar line */
+
     printf("\n\n");
-
-    result = n2;
-
     clock_t end = clock();
     double time_taken = ((double)(end - start)) / CLOCKS_PER_SEC;
+
+    BigInt *result = b1;
 
     printf("Done!\n");
     printf("Result Blocks: %zu (Approx %zu decimal digits)\n", 
@@ -150,14 +155,11 @@ int main() {
     
     printf("First ~50 digits: ");
     bigint_print_head(result, 50);
-    printf("...\n\n");
+    printf("...\n");
 
-    printf("--- Memory Usage ---\n");
-    printf("[Arena 1] "); arena_print_stats(&a1);
-    printf("[Arena 2] "); arena_print_stats(&a2);
-
-    arena_free(&a1);
-    arena_free(&a2);
+    free(b0->digits); free(b0);
+    free(b1->digits); free(b1);
+    free(b2->digits); free(b2);
 
     return 0;
 }

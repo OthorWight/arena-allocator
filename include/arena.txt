@@ -1,7 +1,6 @@
 /*
     arena.h - Single-file arena allocator with scratchpad support.
     Define ARENA_IMPLEMENTATION in one source file before including.
-    Updated for C23.
 */
 
 #ifndef ARENA_H
@@ -9,7 +8,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-/* <stdbool.h> is no longer required in C23 */
+#include <stdbool.h>
 
 #ifndef ARENA_DEFAULT_BLOCK_SIZE
 #define ARENA_DEFAULT_BLOCK_SIZE (8 * 1024) 
@@ -27,7 +26,7 @@ struct ArenaRegion {
     ArenaRegion *next;
     size_t capacity;
     size_t count;
-    uint8_t data[]; /* Flexible array member */
+    uint8_t data[];
 };
 
 typedef struct Arena {
@@ -48,17 +47,14 @@ extern "C" {
 #endif
 
 void arena_init(Arena *a);
-
-/* C23 Attribute: Warn if the returned pointer is ignored */
-[[nodiscard]] void *arena_alloc(Arena *a, size_t size);
-[[nodiscard]] void *arena_alloc_zero(Arena *a, size_t size);
-
+void *arena_alloc(Arena *a, size_t size);
+void *arena_alloc_zero(Arena *a, size_t size);
 void arena_reset(Arena *a);
 void arena_free(Arena *a);
 void arena_print_stats(const Arena *a);
 
 /* Scope-based memory management */
-[[nodiscard]] ArenaTemp arena_temp_begin(Arena *a);
+ArenaTemp arena_temp_begin(Arena *a);
 void arena_temp_end(ArenaTemp temp);
 
 #ifdef __cplusplus
@@ -67,8 +63,6 @@ void arena_temp_end(ArenaTemp temp);
 
 /* --- Helper Macros --- */
 
-/* Note: typeof() is standard in C23, allowing for safer macros if needed, 
-   but standard casting remains most compatible here. */
 #define arena_alloc_struct(a, T) ((T*)arena_alloc(a, sizeof(T)))
 #define arena_alloc_array(a, T, count) ((T*)arena_alloc(a, sizeof(T) * (count)))
 
@@ -84,61 +78,59 @@ void arena_temp_end(ArenaTemp temp);
 #include <assert.h>
 
 static uintptr_t arena__align_forward(uintptr_t ptr, size_t align) {
-    /* C23: auto type inference */
-    auto p = ptr;
-    auto a = (uintptr_t)align;
-    auto modulo = p & (a - 1);
-    
+    uintptr_t p = ptr;
+    uintptr_t a = (uintptr_t)align;
+    uintptr_t modulo = p & (a - 1);
     if (modulo != 0) p += a - modulo;
     return p;
 }
 
 static ArenaRegion *arena__new_region(size_t capacity) {
     size_t size = sizeof(ArenaRegion) + capacity;
-    auto r = (ArenaRegion *)malloc(size);
-    if (!r) return nullptr; /* C23: nullptr keyword */
-    
-    r->next = nullptr;
+    ArenaRegion *r = (ArenaRegion *)malloc(size);
+    if (!r) return NULL;
+    r->next = NULL;
     r->capacity = capacity;
     r->count = 0;
     return r;
 }
 
 void arena_init(Arena *a) {
-    a->begin = nullptr;
-    a->end = nullptr;
+    a->begin = NULL;
+    a->end = NULL;
 }
 
 void *arena_alloc(Arena *a, size_t size) {
-    if (size == 0) return nullptr;
+    if (size == 0) return NULL;
 
     /* Initialize or Reuse Start */
-    if (a->end == nullptr) {
-        if (a->begin != nullptr) {
+    if (a->end == NULL) {
+        if (a->begin != NULL) {
             a->end = a->begin;
             a->end->count = 0;
         } else {
             size_t cap = ARENA_DEFAULT_BLOCK_SIZE;
             if (size > cap) cap = size;
-            
             a->begin = arena__new_region(cap);
-            if (!a->begin) return nullptr;
+            if (!a->begin) return NULL;
             a->end = a->begin;
         }
     }
 
     /* 1. Try to fit in the current block */
-    /* C23 auto makes pointer math variables cleaner */
-    auto curr_ptr = (uintptr_t)a->end->data + a->end->count;
-    auto next_ptr = arena__align_forward(curr_ptr, ARENA_ALIGNMENT);
+    uintptr_t curr_ptr = (uintptr_t)a->end->data + a->end->count;
+    uintptr_t next_ptr = arena__align_forward(curr_ptr, ARENA_ALIGNMENT);
     size_t padding = next_ptr - curr_ptr;
 
     if (a->end->count + padding + size > a->end->capacity) {
         
-        /* 2. Current block full. Look for a 'next' block. */
-        while (a->end->next != nullptr) {
-            auto next = a->end->next;
+        /* 2. Current block full. Look for a 'next' block that is big enough.
+              We "Garbage Collect" small blocks that are no longer useful. */
+        while (a->end->next != NULL) {
+            ArenaRegion *next = a->end->next;
             
+            /* Does the next block have enough capacity? 
+               (We assume it will be empty since we are expanding into it) */
             size_t needed_cap = size + ARENA_ALIGNMENT; 
             
             if (next->capacity >= needed_cap) {
@@ -151,9 +143,9 @@ void *arena_alloc(Arena *a, size_t size) {
                 padding = next_ptr - curr_ptr;
                 goto ALLOC_PROCEED;
             } else {
-                /* Block is too small. Delete it. */
-                a->end->next = next->next;
-                free(next);
+                /* Block is too small. Delete it to save memory. */
+                a->end->next = next->next; /* Unlink */
+                free(next);                /* Free */
             }
         }
 
@@ -164,10 +156,10 @@ void *arena_alloc(Arena *a, size_t size) {
         }
         if (new_cap < ARENA_DEFAULT_BLOCK_SIZE) new_cap = ARENA_DEFAULT_BLOCK_SIZE;
 
-        auto next = arena__new_region(new_cap);
-        if (!next) return nullptr;
+        ArenaRegion *next = arena__new_region(new_cap);
+        if (!next) return NULL;
 
-        next->next = nullptr;
+        next->next = NULL; /* New end */
         a->end->next = next;
         a->end = next;
 
@@ -188,30 +180,31 @@ void *arena_alloc_zero(Arena *a, size_t size) {
 }
 
 void arena_reset(Arena *a) {
+    /* Don't free, just rewind end to begin and reset count */
     if (a->begin) {
         a->end = a->begin;
         a->end->count = 0;
     } else {
-        a->end = nullptr;
+        a->end = NULL;
     }
 }
 
 void arena_free(Arena *a) {
-    auto curr = a->begin;
+    ArenaRegion *curr = a->begin;
     while (curr) {
-        auto next = curr->next;
+        ArenaRegion *next = curr->next;
         free(curr);
         curr = next;
     }
-    a->begin = nullptr;
-    a->end = nullptr;
+    a->begin = NULL;
+    a->end = NULL;
 }
 
 void arena_print_stats(const Arena *a) {
     size_t total_cap = 0;
     size_t used = 0;
     size_t count = 0;
-    auto curr = a->begin;
+    ArenaRegion *curr = a->begin;
     while (curr) {
         total_cap += curr->capacity;
         used += curr->count;
